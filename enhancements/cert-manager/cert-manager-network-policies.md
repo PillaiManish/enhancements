@@ -39,64 +39,58 @@ In a multi-tenant or security-conscious environment, it is crucial to enforce ne
 
 ### Goals
 
-  - Implement a default-deny policy for all pods in the operator namespace (user-configurable) and operand namespaces (`cert-manager` and user-configurable namespace for istio-csr).
+  - Add API fields to enable/disable network policies for cert-manager components and allow user customization.
+  - Implement a default-deny policy for all pods in the operator namespace (user-configurable) and operand namespaces (`cert-manager` and user-configurable namespace for istio-csr) when network policies are enabled.
   - Define specific ingress and egress rules for the `cert-manager` operator pod to allow essential communication.
-  - Define specific ingress and egress rules for each `cert-manager` component (`cert-manager`, `webhook`, `cainjector`) to allow them to function correctly while blocking unnecessary traffic.
-  - Define baseline ingress and egress rules for the `istio-csr` component (deny-all with metrics access), with additional configuration required by users based on their specific deployment requirements.
+  - Define baseline ingress and egress rules for each `cert-manager` component (`cert-manager`, `webhook`, `cainjector`) with deny-all default and user-configurable network policies via the API.
+  - Define baseline ingress and egress rules for the `istio-csr` component (deny-all with metrics access), with user-configurable network policies via the API for additional access requirements.
   - Ensure that metrics collection for all components remains functional.
   - Ensure the API server can communicate with the `cert-manager-webhook` for admission control.
+  - Provide backward compatibility by making network policies opt-in via the `DefaultNetworkPolicy` field.
 
 ### Non-Goals
 
   - This enhancement does not propose creating a generic, cluster-wide policy management solution. The policies are specific to `cert-manager`.
   - We are not introducing AdminNetworkPolicy at this stage, as standard NetworkPolicy objects are sufficient for this scope and can be managed directly by the operator.
-  - Creating a user-facing option to disable these policies is not in scope, as they represent a baseline security posture.
-  - Providing a user-configurable mechanism to customize the broad egress rule for the `cert-manager` controller is not in scope for this initial implementation. Users who require more restrictive policies can supplement these baseline policies with additional NetworkPolicy objects.
-  - Automatically detecting and configuring istio-csr gRPC service ports and client access patterns is not in scope. Users must manually configure additional NetworkPolicy rules based on their specific istio-csr deployment configuration.
+  - Automatically detecting and configuring istio-csr gRPC service ports and client access patterns is not in scope. Users must configure network policies via the API based on their specific istio-csr deployment configuration.
 
 ## Proposal
 
-The proposal is to have the `cert-manager-operator` create and manage a set of `NetworkPolicy` objects across all managed namespaces: the operator's deployment namespace for the operator itself, `cert-manager` for the core operands, and the user-configured namespace for the `istio-csr` operand. The strategy is to first apply a default-deny policy and then layer more specific `allow` policies for required traffic flows.
+The proposal is to extend the `CertManager` and `IstioCSR` custom resources with new API fields to enable and configure network policies. The `cert-manager-operator` will create and manage `NetworkPolicy` objects across all managed namespaces based on these API configurations. For cert-manager, network policies are opt-in via the `DefaultNetworkPolicy` field for backward compatibility. For istio-csr, network policies are enabled by default. The strategy is to first apply a default-deny policy and then allow users to configure additional rules via the API.
 
 ### Workflow Description
 
-1.  **Default Deny:** For each managed namespace (operator's deployment namespace, `cert-manager`, and the istio-csr deployment namespace), the operator will create a baseline `NetworkPolicy` that selects all pods and applies a full ingress and egress deny. This ensures that no traffic is allowed unless explicitly permitted by another policy.
+1.  **API-Driven Configuration:** Users configure network policies through the `CertManager` and `IstioCSR` custom resource specifications:
+    - For cert-manager: Set `DefaultNetworkPolicy: "enabled"` and optionally provide custom `NetworkPolicy` rules
+    - For istio-csr: Provide custom `NetworkPolicy` rules (network policies are enabled by default)
 
-2.  **Operator Policies:** For the operator's deployment namespace, the operator will create policies to:
+2.  **Default Deny:** When network policies are enabled, the operator will create baseline `NetworkPolicy` objects that deny all traffic for the respective components. This ensures that no traffic is allowed unless explicitly permitted.
 
-      * **Allow Egress to API Server:** Permit outgoing traffic from the operator pod to the Kubernetes API server on port 6443/TCP. This is critical for the operator to manage resources and reconcile its state.
-      * **Allow Ingress for Metrics:** Permit incoming traffic to the operator pod on port 8443/TCP from any source, allowing Prometheus to scrape metrics.
+3.  **Operator Policies:** For the operator's deployment namespace, the operator will create default policies to:
 
-3.  **Operand Policies:** For the `cert-manager` namespace, which contains the operands, the operator will create policies for each component:
+      * **Allow Egress to API Server:** Permit outgoing traffic from the operator pod to the Kubernetes API server on port 6443/TCP.
+      * **Allow Ingress for Metrics:** Permit incoming traffic to the operator pod on port 8443/TCP for Prometheus metrics scraping.
 
-      * **For the `cert-manager` controller pod (`app: cert-manager`):**
+4.  **Cert-Manager Operand Policies:** When `DefaultNetworkPolicy` is enabled, the operator will create baseline policies for each component:
 
-          * **Allow Egress to API Server:** Permit egress to the API server on port 6443/TCP for its core reconciliation loops.
-          * **Allow Egress for Issuers:** Permit all egress traffic to allow communication with various external ACME issuers (e.g., Let's Encrypt) or other services required for certificate challenges.
-          * **Allow Ingress for Metrics:** Permit ingress on its metrics port (9402/TCP).
+      * **Default policies include:**
+          * **API Server Egress:** For all components to communicate with the Kubernetes API server
+          * **Metrics Ingress:** For all components to expose metrics on port 9402/TCP
+          * **Webhook Ingress:** For the webhook component to receive admission requests on port 10250/TCP
 
-      * **For the `cert-manager-webhook` pod (`app: webhook`):**
+      * **User-configurable policies:** Users can specify additional or custom rules via the `NetworkPolicy` field in the `CertManager` spec. If not provided, cert-manager components will have deny-all policies (which will prevent proper operation without user configuration).
 
-          * **Allow Egress to API Server:** Permit egress to the API server on port 6443/TCP.
-          * **Allow Ingress from API Server:** Permit ingress on the webhook port (10250/TCP) to receive admission review requests from the Kubernetes API server.
-          * **Allow Ingress for Metrics:** Permit ingress on its metrics port (9402/TCP).
+5.  **Istio-CSR Policies:** The operator will create baseline policies for istio-csr:
 
-      * **For the `cert-manager-cainjector` pod (`app: cainjector`):**
+      * **Default policies include:**
+          * **API Server Egress:** For communication with the Kubernetes API server on port 6443/TCP
+          * **Metrics Ingress:** For exposing metrics on port 9402/TCP
 
-          * **Allow Egress to API Server:** Permit egress to the API server on port 6443/TCP so it can inject CA data into other resources.
-          * **Allow Ingress for Metrics:** Permit ingress on its metrics port (9402/TCP).
-
-4.  **Istio-CSR Policies:** For the istio-csr deployment namespace (user-configurable), the operator will create baseline policies for:
-
-      * **For the `istio-csr` pod (`app: cert-manager-istio-csr`):**
-
-          * **Allow Egress to API Server:** Permit egress to the API server on port 6443/TCP for its core reconciliation loops and leader election.
-          * **Allow Ingress for Metrics:** Permit ingress on its metrics port (9402/TCP).
-          * **Note:** Additional ingress rules for the gRPC service port (default 6443/TCP, but user-configurable) must be configured by users based on their specific istio-csr deployment configuration and requirements.
+      * **User-required policies:** Users must specify additional rules via the `NetworkPolicy` field in the `IstioCSR` spec for gRPC service access and other requirements. If not provided, istio-csr will have deny-all policies that prevent proper operation.
 
 ### Implementation Details/Notes/Constraints
 
-The implementation will involve creating multiple `NetworkPolicy` YAML files, managed and applied by the operator.
+The implementation will involve extending the existing APIs and creating `NetworkPolicy` objects based on the user's API configuration. The operator will manage these policies according to the specifications provided in the custom resources.
 
 #### Operator Namespace Policies
 
@@ -142,11 +136,11 @@ The implementation will involve creating multiple `NetworkPolicy` YAML files, ma
           port: 8443
     ```
 
-#### Operand Namespace (`cert-manager`) Policies
+#### Cert-Manager Operand Namespace Policies
 
-The policies for the operand namespace will be structured similarly, with a deny-all policy followed by specific allow policies for each component, targeting them via their `app` label (`cert-manager`, `webhook`, `cainjector`). Each will have egress allowed to the API server and ingress allowed for metrics (port 9402), with the webhook additionally allowing ingress on port 10250 for admission control.
+When `DefaultNetworkPolicy` is set to "enabled", the operator will create baseline policies for cert-manager components. Users can provide additional or custom policies via the `NetworkPolicy` field in the `CertManager` spec.
 
-1.  **Deny All Traffic:** A baseline policy will deny all traffic in the `cert-manager` namespace.
+1.  **Baseline Deny-All Policy:** Applied when `DefaultNetworkPolicy` is enabled.
 
     ```yaml
     apiVersion: networking.k8s.io/v1
@@ -161,39 +155,48 @@ The policies for the operand namespace will be structured similarly, with a deny
       - Egress
     ```
 
-2.  **Allow `cert-manager` Controller Traffic:** This policy allows the main controller to talk to issuers and exposes its metrics port.
+2.  **Default Allow Policies:** The operator creates these baseline policies when `DefaultNetworkPolicy` is enabled:
 
     ```yaml
+    # API Server egress for all components
     apiVersion: networking.k8s.io/v1
     kind: NetworkPolicy
     metadata:
-      name: allow-cert-manager-controller-traffic
+      name: allow-api-server-egress
       namespace: cert-manager
     spec:
       podSelector:
         matchLabels:
-          app: cert-manager
+          app.kubernetes.io/name: cert-manager
       policyTypes:
-      - Ingress
       - Egress
       egress:
-      - {} # Allow all egress for communication with external issuers
-           # This broad rule is necessary as issuers can be deployed anywhere
-           # and the controller needs to communicate with various external services
-           # for certificate challenges (ACME, DNS providers, etc.)
+      - ports:
+        - protocol: TCP
+          port: 6443
+    ---
+    # Metrics ingress for all components
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: allow-metrics-ingress
+      namespace: cert-manager
+    spec:
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: cert-manager
+      policyTypes:
+      - Ingress
       ingress:
       - ports:
         - protocol: TCP
           port: 9402
-    ```
-
-3.  **Allow `cert-manager-webhook` Traffic:** This policy allows the webhook to function and expose its metrics.
-
-    ```yaml
+    ---
+    # Webhook ingress for admission control
     apiVersion: networking.k8s.io/v1
     kind: NetworkPolicy
     metadata:
-      name: allow-cert-manager-webhook-traffic
+      name: allow-webhook-ingress
       namespace: cert-manager
     spec:
       podSelector:
@@ -201,42 +204,33 @@ The policies for the operand namespace will be structured similarly, with a deny
           app: webhook
       policyTypes:
       - Ingress
-      - Egress
-      egress:
-      - ports:
-        - protocol: TCP
-          port: 6443
       ingress:
       - ports:
         - protocol: TCP
-          port: 10250 # Webhook port for API server
-        - protocol: TCP
-          port: 9402  # Metrics port
+          port: 10250
     ```
 
-4.  **Allow `cert-manager-cainjector` Traffic:** This policy allows the CA injector to communicate with the API server and expose its metrics.
+3.  **User-Configurable Policies:** Users must configure additional policies via the API for cert-manager controller egress (to communicate with external issuers). Example user configuration:
 
     ```yaml
-    apiVersion: networking.k8s.io/v1
-    kind: NetworkPolicy
+    apiVersion: operator.openshift.io/v1alpha1
+    kind: CertManager
     metadata:
-      name: allow-cert-manager-cainjector-traffic
-      namespace: cert-manager
+      name: cluster
     spec:
-      podSelector:
-        matchLabels:
-          app: cainjector
-      policyTypes:
-      - Ingress
-      - Egress
-      egress:
-      - ports:
-        - protocol: TCP
-          port: 6443
-      ingress:
-      - ports:
-        - protocol: TCP
-          port: 9402
+      defaultNetworkPolicy: "enabled"
+      networkPolicy:
+        metadata:
+          name: allow-cert-manager-controller-egress
+          namespace: cert-manager
+        spec:
+          podSelector:
+            matchLabels:
+              app: cert-manager
+          policyTypes:
+          - Egress
+          egress:
+          - {} # Allow all egress for external issuers communication
     ```
 
 #### Istio-CSR Namespace Policies
@@ -266,13 +260,31 @@ The `istio-csr` component requires specific network policies to function correct
       - Egress
     ```
 
-2.  **Allow `istio-csr` Baseline Traffic:** This policy provides baseline access for the istio-csr component (API server communication and metrics). **Users must add additional NetworkPolicy rules for gRPC service access based on their configuration.**
+2.  **Default Baseline Policies:** The operator creates these baseline policies for istio-csr:
 
     ```yaml
+    # API Server egress
     apiVersion: networking.k8s.io/v1
     kind: NetworkPolicy
     metadata:
-      name: allow-istio-csr-baseline-traffic
+      name: allow-istio-csr-api-server-egress
+      namespace: istio-system  # Replace with actual istio-csr deployment namespace
+    spec:
+      podSelector:
+        matchLabels:
+          app: cert-manager-istio-csr
+      policyTypes:
+      - Egress
+      egress:
+      - ports:
+        - protocol: TCP
+          port: 6443 # API server access for reconciliation and leader election
+    ---
+    # Metrics ingress
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: allow-istio-csr-metrics-ingress
       namespace: istio-system  # Replace with actual istio-csr deployment namespace
     spec:
       podSelector:
@@ -280,41 +292,96 @@ The `istio-csr` component requires specific network policies to function correct
           app: cert-manager-istio-csr
       policyTypes:
       - Ingress
-      - Egress
-      egress:
-      - ports:
-        - protocol: TCP
-          port: 6443 # API server access for reconciliation and leader election
       ingress:
       - ports:
         - protocol: TCP
           port: 9402  # Metrics port
     ```
 
-3.  **User-Required gRPC Service Policy Example:** Users must create additional policies like this based on their istio-csr gRPC service port configuration:
+3.  **User-Required Configuration via API:** Users must configure additional policies via the `NetworkPolicy` field in the `IstioCSR` spec. Example configuration:
 
     ```yaml
-    apiVersion: networking.k8s.io/v1
-    kind: NetworkPolicy
+    apiVersion: operator.openshift.io/v1alpha1
+    kind: IstioCSR
     metadata:
-      name: allow-istio-csr-grpc-service
-      namespace: istio-system  # Replace with actual istio-csr deployment namespace
+      name: cluster
     spec:
-      podSelector:
-        matchLabels:
-          app: cert-manager-istio-csr
-      policyTypes:
-      - Ingress
-      ingress:
-      - ports:
-        - protocol: TCP
-          port: 6443  # Replace with actual configured gRPC service port
-        # Add appropriate 'from' selectors based on your Istio components' labels/namespaces
+      networkPolicy:
+        metadata:
+          name: allow-istio-csr-grpc-service
+          namespace: istio-system  # Replace with actual deployment namespace
+        spec:
+          podSelector:
+            matchLabels:
+              app: cert-manager-istio-csr
+          policyTypes:
+          - Ingress
+          ingress:
+          - ports:
+            - protocol: TCP
+              port: 6443  # Replace with actual configured gRPC service port
+            # Add appropriate 'from' selectors based on your Istio components
     ```
 
 ### API Extensions
 
-This enhancement does not introduce any new APIs or modify existing API structures. It exclusively uses the standard `networking.k8s.io/v1/NetworkPolicy` resource.
+This enhancement introduces new fields to the existing `CertManager` and `IstioCSR` custom resources to support network policy configuration.
+
+#### CertManager API Changes
+
+The `CertManagerSpec` will be extended with two new fields:
+
+```go
+type CertManagerSpec struct {
+    // ... existing fields ...
+
+    // DefaultNetworkPolicy enables or disables the default network policy for cert-manager components.
+    // When set to "enabled", the operator will create default network policies to secure
+    // communication between cert-manager controller, webhook, and cainjector components.
+    // When set to "disabled" or empty, no default network policies are created.
+    // Valid values are: "enabled", "disabled", or empty (default: disabled).
+    //
+    // +kubebuilder:validation:Optional
+    // +kubebuilder:validation:Enum=enabled;disabled
+    // +optional
+    DefaultNetworkPolicy string `json:"defaultNetworkPolicy,omitempty"`
+
+    // NetworkPolicy specifies the network policy configuration to be applied to cert-manager
+    // pods/operands when DefaultNetworkPolicy is enabled. By default, enabling network policies
+    // creates a deny-all policy that blocks all network traffic to and from cert-manager components.
+    // Use this field to provide the necessary network policy rules that allow required traffic
+    // for cert-manager to function properly (e.g., API server communication, webhook traffic, etc.).
+    //
+    // This field is only effective when DefaultNetworkPolicy is set to "enabled".
+    // If DefaultNetworkPolicy is enabled but this field is not provided, cert-manager
+    // components will be isolated with deny-all network policies.
+    //
+    // +kubebuilder:validation:Optional
+    // +optional
+    NetworkPolicy *v1.NetworkPolicy `json:"networkPolicy,omitempty"`
+}
+```
+
+#### IstioCSR API Changes
+
+The `IstioCSRSpec` will be extended with a new field:
+
+```go
+type IstioCSRSpec struct {
+    // ... existing fields ...
+
+    // NetworkPolicy specifies the network policy configuration to be applied to istio-csr
+    // pods. By default, network policies are enabled with a deny-all approach that blocks
+    // all network traffic to and from istio-csr components.
+    //
+    // If this field is not provided, istio-csr components will be isolated with deny-all
+    // network policies, which will prevent proper operation.
+    //
+    // +kubebuilder:validation:Optional
+    // +optional
+    NetworkPolicy *v1.NetworkPolicy `json:"networkPolicy,omitempty"`
+}
+```
 
 ### Topology Considerations
 
@@ -350,16 +417,17 @@ The main drawback is the added complexity of managing multiple `NetworkPolicy` o
 ## Test Plan
 
   * **Integration Tests:**
-    1.  Deploy the operator and confirm all `NetworkPolicy` objects are created as expected in all managed namespaces (operator's deployment namespace, `cert-manager`, istio-csr deployment namespace).
-    2.  Verify the operator and all operand pods (including `istio-csr`) are running without errors or crash loops.
-    3.  Create a `curl` pod and confirm it **can** access the metrics endpoints (`:8443` for operator, `:9402` for operands including `istio-csr`).
-    4.  Confirm the `curl` pod **cannot** `ping` or otherwise access the pods on non-allowed ports.
-    5.  Verify that `istio-csr` can communicate with the API server for leader election and resource reconciliation.
-    6.  Verify that `istio-csr` gRPC service is **blocked** by default and requires user-configured additional NetworkPolicy rules to function.
+    1.  Test with `DefaultNetworkPolicy: "disabled"` (default): Verify no NetworkPolicy objects are created and cert-manager functions normally.
+    2.  Test with `DefaultNetworkPolicy: "enabled"` but no custom `NetworkPolicy` specified: Verify baseline policies are created and cert-manager controller cannot communicate with external issuers (expected behavior).
+    3.  Test with `DefaultNetworkPolicy: "enabled"` and custom `NetworkPolicy` for cert-manager controller egress: Verify cert-manager can communicate with external issuers.
+    4.  Test istio-csr with no `NetworkPolicy` specified: Verify baseline policies are created and gRPC service is blocked (expected behavior).
+    5.  Test istio-csr with custom `NetworkPolicy` for gRPC service: Verify istio-csr can receive certificate signing requests.
+    6.  Create a `curl` pod and confirm it **can** access the metrics endpoints (`:8443` for operator, `:9402` for operands) when policies are enabled.
+    7.  Confirm the `curl` pod **cannot** access pods on non-allowed ports when policies are enabled.
   * **End-to-End (E2E) Tests:**
-    1.  Run the existing `cert-manager` E2E test suite with the network policies enabled.
-    2.  Create a `Certificate` resource and verify it is successfully issued, which validates the entire flow from API server -> webhook -> controller -> issuer. This implicitly tests the webhook ingress and the controller's egress capabilities.
-    3.  Configure additional NetworkPolicy rules for `istio-csr` gRPC service based on the deployment configuration, then run the `istio-csr` E2E test suite to ensure that certificate signing requests from Istio components are processed correctly.
+    1.  Run the existing `cert-manager` E2E test suite with `DefaultNetworkPolicy: "disabled"` to ensure no regression.
+    2.  Configure proper NetworkPolicy settings via the API and run the cert-manager E2E test suite with network policies enabled.
+    3.  Configure proper NetworkPolicy settings for istio-csr via the API and run the istio-csr E2E test suite with network policies enabled.
 
 ## Graduation Criteria
 
@@ -384,8 +452,11 @@ Not applicable.
 
 ## Upgrade / Downgrade Strategy
 
-  * **Upgrade:** On upgrade, the operator will apply the new `NetworkPolicy` objects. Since the previous version had no policies, this will be a seamless transition to a more secure state.
-  * **Downgrade:** If a user downgrades to a version of the operator that is not aware of network policies, the `NetworkPolicy` objects will be orphaned (left behind). Since older versions operated in a default-allow world, these leftover restrictive policies could break the installation. The downgrade documentation must instruct the user to manually delete the `NetworkPolicy` objects from the operator's deployment namespace, `cert-manager`, and istio-csr deployment namespace before downgrading. This is only necessary if the network policies have been modified from their default configuration.
+  * **Upgrade:** On upgrade, the new API fields will be available but network policies remain disabled by default (`DefaultNetworkPolicy: "disabled"`). This ensures backward compatibility. Users must explicitly enable network policies and configure them appropriately.
+  * **Downgrade:** If a user downgrades to a version of the operator that is not aware of the new API fields:
+    - The API fields will be ignored by the older operator version
+    - Any existing `NetworkPolicy` objects created by the newer operator will be orphaned
+    - Users should disable network policies (`DefaultNetworkPolicy: "disabled"`) and remove custom `NetworkPolicy` configurations before downgrading to prevent orphaned policies from blocking traffic
 
 ## Alternatives (Not Implemented)
 
@@ -402,12 +473,22 @@ Not applicable, as this enhancement does not introduce any API extensions.
 
 ## Support Procedures
 
-Support personnel debugging potential issues should first check the `NetworkPolicy` resources in the operator's deployment namespace, `cert-manager`, and istio-csr deployment namespace.
+Support personnel debugging potential network policy issues should follow these steps:
 
-1.  Verify the policies exist in all managed namespaces: `oc get networkpolicy -n <operator-namespace>`, `oc get networkpolicy -n cert-manager`, and `oc get networkpolicy -n <istio-csr-namespace>`.
-2.  If a pod is suspected of having network connectivity issues, check its logs for connection timeout errors.
-3.  Use the OpenShift Network Observability Operator or similar tools to visualize traffic and identify any connections being dropped by the policies.
-4.  For `istio-csr` specific issues:
-   - Verify that API server communication is working for leader election.
-   - Check if user has configured additional NetworkPolicy rules for the gRPC service port.
-   - Verify the gRPC service port configuration matches the NetworkPolicy rules.
+1.  **Check API Configuration:**
+    - Verify `CertManager` resource: `oc get certmanager cluster -o yaml` and check `defaultNetworkPolicy` and `networkPolicy` fields
+    - Verify `IstioCSR` resource: `oc get istiocsr cluster -o yaml` and check `networkPolicy` field
+
+2.  **Verify NetworkPolicy Objects:**
+    - Check if NetworkPolicy objects exist: `oc get networkpolicy -n <namespace>`
+    - Compare actual policies with expected configuration from the API specs
+
+3.  **Troubleshoot Connectivity Issues:**
+    - Check pod logs for connection timeout errors
+    - Use the OpenShift Network Observability Operator to visualize traffic flows
+    - Verify that required NetworkPolicy rules are configured via the API
+
+4.  **Common Issues:**
+    - **Cert-manager controller cannot reach external issuers:** Check if custom `NetworkPolicy` is configured in `CertManager` spec for controller egress
+    - **Istio-csr gRPC service not accessible:** Check if custom `NetworkPolicy` is configured in `IstioCSR` spec for gRPC ingress
+    - **Metrics not accessible:** Verify baseline policies are applied correctly
