@@ -66,7 +66,7 @@ The proposal is to extend the `CertManager` and `IstioCSR` custom resources with
 
 2.  **Default Deny:** When network policies are enabled, the operator will create baseline `NetworkPolicy` objects that deny all traffic for the respective components. This ensures that no traffic is allowed unless explicitly permitted.
 
-3.  **Operator Policies:** For the operator's deployment namespace, the operator will create default policies to:
+3.  **Operator Policies:** For the operator's deployment namespace, the operator's network policies will be managed by the OLM bundle. These policies include:
 
       * **Allow Egress to API Server:** Permit outgoing traffic from the operator pod to the Kubernetes API server on port 6443/TCP.
       * **Allow Ingress for Metrics:** Permit incoming traffic to the operator pod on port 8443/TCP for Prometheus metrics scraping.
@@ -90,11 +90,11 @@ The proposal is to extend the `CertManager` and `IstioCSR` custom resources with
 
 ### Implementation Details/Notes/Constraints
 
-The implementation will involve extending the existing APIs and creating `NetworkPolicy` objects based on the user's API configuration. The operator will manage these policies according to the specifications provided in the custom resources.
+The implementation will involve extending the existing APIs and creating `NetworkPolicy` objects based on the user's API configuration. The operator will manage operand network policies according to the specifications provided in the custom resources, while the operator's own network policies will be handled by the OLM bundle.
 
 #### Operator Namespace Policies
 
-**Note:** The operator namespace is user-configurable. The examples below use `cert-manager-operator` as the namespace, but this should be replaced with the actual deployment namespace.
+**Note:** The operator namespace is user-configurable. The examples below use `cert-manager-operator` as the namespace, but this should be replaced with the actual deployment namespace. The operator's network policies will be managed by the OLM bundle rather than by the operator itself.
 
 1.  **Deny All Traffic:**
 
@@ -512,7 +512,7 @@ Not applicable.
 
 ## Version Skew Strategy
 
-This enhancement only involves adding `NetworkPolicy` resources, which are managed by the `cert-manager-operator`. There are no version skew concerns with other components, as the operator's version will be tied to the policies it deploys. The Kubernetes API for `NetworkPolicy` is stable.
+This enhancement only involves adding `NetworkPolicy` resources. The operand network policies are managed by the `cert-manager-operator`, while the operator's own network policies are managed by the OLM bundle. There are no version skew concerns with other components, as the operator's version will be tied to the operand policies it deploys. The Kubernetes API for `NetworkPolicy` is stable.
 
 ## Operational Aspects of API Extensions
 
