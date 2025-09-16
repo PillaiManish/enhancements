@@ -221,6 +221,7 @@ When `DefaultNetworkPolicy` is set to "true", the operator will create baseline 
       defaultNetworkPolicy: "true"
       networkPolicies:
         - name: allow-cert-manager-controller-egress
+          componentName: CoreController
           policyTypes:
           - Egress
           egress:
@@ -302,6 +303,7 @@ The `istio-csr` component requires specific network policies to function correct
     spec:
       networkPolicies:
         - name: allow-istio-csr-grpc-service
+          componentName: IstioCSR
           policyTypes:
           - Ingress
           ingress:
@@ -328,12 +330,12 @@ type CertManagerSpec struct {
     // When set to "false" or empty, no default network policies are created.
     // Valid values are: "true", "false", or empty (default: false).
     //
-	// This field is provided for backwards compatibility to avoid disrupting existing deployments
-	// that have followed the upgrade path without network policies. In a future release, this field
-	// will be deprecated and network policies will be created by default for enhanced security.
-	// Users are encouraged to enable this field and define appropriate NetworkPolicies to prepare
-	// for the future default behavior and to improve their security posture.
-	//
+    // This field is provided for backwards compatibility to avoid disrupting existing deployments
+    // that have followed the upgrade path without network policies. In a future release, this field
+    // will be deprecated and network policies will be created by default for enhanced security.
+    // Users are encouraged to enable this field and define appropriate NetworkPolicies to prepare
+    // for the future default behavior and to improve their security posture.
+    //
     // +kubebuilder:validation:Optional
     // +kubebuilder:validation:Enum=true;false
     // +optional
@@ -355,8 +357,26 @@ type CertManagerSpec struct {
     
     // +kubebuilder:validation:Optional
     // +optional
-    NetworkPolicies []*NetworkPolicy `json:"networkPolicies,omitempty"`
+    NetworkPolicies []NetworkPolicy `json:"networkPolicies,omitempty"`
 }
+
+// ComponentName represents the different cert-manager components that can have network policies applied.
+type ComponentName string
+
+const (
+    // CAInjector represents the cert-manager CA injector component
+    CAInjector ComponentName = "CAInjector"
+
+    // CoreController represents the cert-manager core controller component  
+    CoreController ComponentName = "CertManager"
+
+    // Webhook represents the cert-manager webhook component
+    Webhook ComponentName = "Webhook"
+    
+    // IstioCSR represents the cert-manager Istio CSR component
+    IstioCSR ComponentName = "IstioCSR"
+)
+
 
 // NetworkPolicy represents a custom network policy configuration for operator-managed components.
 // It includes a name for identification and the network policy rules to be enforced.
@@ -366,6 +386,11 @@ type NetworkPolicy struct {
     // +kubebuilder:validation:Required
     // +required
     Name string `json:"name"`
+
+    // ComponentName represents the different cert-manager components that can have network policies applied.
+    // +kubebuilder:validation:Enum:=CAInjector;CoreController;WebHook;IstioCSR
+    // +kubebuilder:validation:Required
+    ComponentName ComponentName `json:"componentName"`
 
     // ingress is a list of ingress rules to be applied to the selected pods.
     // Traffic is allowed to a pod if there are no NetworkPolicies selecting the pod
@@ -426,7 +451,7 @@ type IstioCSRSpec struct {
     //
     // +kubebuilder:validation:Optional
     // +optional
-    NetworkPolicies []*NetworkPolicy `json:"networkPolicies,omitempty"`
+    NetworkPolicies []NetworkPolicy `json:"networkPolicies,omitempty"`
 }
 ```
 
