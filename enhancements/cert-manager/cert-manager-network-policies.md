@@ -9,9 +9,9 @@ approvers:
 api-approvers:
   - "@tgeer" ## approver for cert-manager component
 creation-date: 2025-07-03
-last-updated: 2025-01-21
+last-updated: 2025-09-16
 tracking-link:
-  - https://issues.redhat.com/browse/CM-525
+  - https://issues.redhat.com/browse/CM-624
 see-also:
   - NA
 replaces:
@@ -24,7 +24,7 @@ superseded-by:
 
 ## Summary
 
-This document proposes the implementation of specific, fine-grained Kubernetes NetworkPolicy objects for the `cert-manager` operator and its operands. The operator can be deployed in any namespace (commonly `cert-manager-operator` but user-configurable), while the operands (including `cert-manager`, `webhook`, `cainjector`, and `istio-csr`) run in their respective operand namespaces (`cert-manager` for core components and user-configurable namespace for `istio-csr`). Currently, the operator and its components run without network restrictions, posing a potential security risk. By defining explicit ingress and egress rules, we can enforce the principle of least privilege, securing all managed namespaces and ensuring that components only communicate with necessary services like the Kubernetes API server and Prometheus.
+This document proposes the implementation of specific, fine-grained Kubernetes NetworkPolicy objects for the `cert-manager` operator and its operands. The operator can be deployed in any namespace (commonly `cert-manager-operator` but user-configurable), while the operands (including `cert-manager`, `webhook`, `cainjector`, and `istio-csr`) run in their respective operand namespaces (`cert-manager` for core components and user-configurable namespace for `istio-csr`). Currently, the operator and its components run without network restrictions, posing a potential security risk. By defining explicit ingress and egress rules, we can enforce the principle of least privilege, securing all managed namespaces and ensuring that components only communicate with necessary services like the Kubernetes API server and Prometheus. The operator will manage operand network policies by deploying default policies with additional user-configured policies via API, while the operator's own network policies will be handled by the OLM bundle.
 
 ## Motivation
 
@@ -90,7 +90,7 @@ The proposal is to extend the `CertManager` and `IstioCSR` custom resources with
 
 ### Implementation Details/Notes/Constraints
 
-The implementation will involve extending the existing APIs and creating `NetworkPolicy` objects based on the user's API configuration. The operator will manage operand network policies according to the specifications provided in the custom resources, while the operator's own network policies will be handled by the OLM bundle.
+The implementation will involve extending the existing APIs and creating `NetworkPolicy` objects based on the user's API configuration. The operator will manage operand network policies by deploying default policies with additional user-configured policies according to the specifications provided in the custom resources, while the operator's own network policies will be handled by the OLM bundle.
 
 #### Operator Namespace Policies
 
